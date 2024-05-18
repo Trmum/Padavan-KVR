@@ -7,7 +7,9 @@ all: download_test config_test
 	$(MAKE) -j$(HOST_NCPU) -C $(SRC_NAME)/build
 
 download_test:
-	(       cd $(SRC_NAME) ; \
+	( if [ ! -d $(THISDIR)/$(SRC_NAME) ]; then \
+		git clone https://github.com/rozhuk-im/msd_lite.git ; \
+		cd $(SRC_NAME) ; \
 		git submodule update --init --recursive ; \
 		patch -p1 -i ../msd_lite.diff ; \
 	fi )
