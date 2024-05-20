@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2012 - 2021 Rozhuk Ivan <rozhuk.im@gmail.com>
+ * Copyright (c) 2012-2024 Rozhuk Ivan <rozhuk.im@gmail.com>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -50,6 +50,7 @@
 #include <unistd.h> /* close, write, sysconf */
 #include <fcntl.h> /* open, fcntl */
 #include <signal.h> /* SIGNAL constants. */
+#include <syslog.h>
 
 
 #include "utils/mem_utils.h"
@@ -65,7 +66,6 @@
 #include "threadpool/threadpool_task.h"
 #include "utils/buf_str.h"
 #include "utils/sys.h"
-#include "utils/log.h"
 #include "proto/http_server.h"
 #include "utils/info.h"
 #include "utils/cmd_line_daemon.h"
@@ -115,7 +115,8 @@ int		msd_http_srv_hub_attach(http_srv_cli_p cli,
 		    uint8_t *hub_name, size_t hub_name_size,
 		    str_src_conn_params_p src_conn_params);
 uint32_t	msd_http_req_url_parse(http_srv_req_p req,
-		    struct sockaddr_storage *ssaddr, uint32_t *if_index,
+		    struct sockaddr_storage *ssaddr,
+		    uint32_t *if_index, uint32_t *rejoin_time,
 		    uint8_t *hub_name, size_t hub_name_size,
 		    size_t *hub_name_size_ret);
 
@@ -264,6 +265,9 @@ msd_src_conn_profile_load(const uint8_t *data, size_t data_size, void *conn) {
 		if_name[MIN(IFNAMSIZ, tm)] = 0;
 		((str_src_conn_mc_p)conn)->if_index = if_nametoindex(if_name);
 	}
+	xml_get_val_uint32_args(data, data_size, NULL,
+	    &((str_src_conn_mc_p)conn)->rejoin_time,
+	    (const uint8_t*)"multicast", "rejoinTime", NULL);
 
 	return (0);
 }
@@ -273,14 +277,13 @@ msd_src_conn_profile_load(const uint8_t *data, size_t data_size, void *conn) {
 int
 main(int argc, char *argv[]) {
 	int error = 0;
-	int log_fd = -1;
 	uint8_t *cfg_file_buf = NULL;
 	size_t tm, cfg_file_buf_size = 0;
 	tp_p tp;
 	cmd_line_data_t cmd_line_data;
 
 
-	mem_bzero(&g_data, sizeof(g_data));
+	memset(&g_data, 0x00, sizeof(g_data));
 	if (0 != cmd_line_parse(argc, argv, &cmd_line_data)) {
 		cmd_line_usage(PACKAGE_DESCRIPTION, PACKAGE_VERSION,
 		    "Rozhuk Ivan <rozhuk.im@gmail.com>",
@@ -289,60 +292,49 @@ main(int argc, char *argv[]) {
 	}
 	if (0 != cmd_line_data.daemon) {
 		make_daemon();
+		openlog(PACKAGE_NAME,
+		    (LOG_NDELAY | LOG_PID | ((0 != cmd_line_data.verbose) ? LOG_PERROR : 0)),
+		    LOG_DAEMON);
+	} else {
+		openlog(PACKAGE_NAME,
+		    (LOG_NDELAY | LOG_PID | LOG_PERROR), LOG_USER);
 	}
+	setlogmask(LOG_UPTO(cmd_line_data.log_level));
 
-    { // process config file
+    { /* Process config file. */
 	const uint8_t *data;
-	char strbuf[1024];
 	size_t data_size;
 	tp_settings_t tp_s;
 	http_srv_cli_ccb_t ccb;
 	http_srv_settings_t http_s;
 
-	g_log_fd = (uintptr_t)open("/dev/stderr", (O_WRONLY | O_APPEND));
 	error = read_file(cmd_line_data.cfg_file_name, 0, 0, 0,
 	    CFG_FILE_MAX_SIZE, &cfg_file_buf, &cfg_file_buf_size);
 	if (0 != error) {
-		LOG_ERR(error, "config read_file()");
+		SYSLOG_ERR(LOG_CRIT, error, "config read_file().");
 		goto err_out;
 	}
 	if (0 != xml_get_val_args(cfg_file_buf, cfg_file_buf_size,
 	    NULL, NULL, NULL, NULL, NULL,
 	    (const uint8_t*)"msd", NULL)) {
-		LOG_INFO("Config file XML format invalid.");
+		syslog(LOG_CRIT, "Config file XML format invalid.");
 		goto err_out;
 	}
 
-	/* Log file */
-	if (0 == cmd_line_data.verbose &&
-	    0 == MSD_CFG_GET_VAL_DATA(NULL, &data, &data_size,
-	    "log", "file", NULL)) {
-		if (sizeof(strbuf) > data_size) {
-			memcpy(strbuf, data, data_size);
-			strbuf[data_size] = 0;
-			log_fd = open(strbuf,
-			    (O_WRONLY | O_APPEND | O_CREAT), 0644);
-			if (-1 == log_fd) {
-				LOG_ERR(errno, "Fail to open log file.");
-			}
-		} else {
-			LOG_ERR(EINVAL, "Log file name too long.");
-		}
-	} else if (0 != cmd_line_data.verbose) {
-		log_fd = open("/dev/stdout", (O_WRONLY | O_APPEND));
+	/* Log level. */
+	if (0 == MSD_CFG_GET_VAL_UINT(NULL, (uint32_t*)&cmd_line_data.log_level,
+	    "log", "level", NULL)) {
+		setlogmask(LOG_UPTO(cmd_line_data.log_level));
 	}
-	close((int)g_log_fd);
-	g_log_fd = (uintptr_t)log_fd;
-	fd_set_nonblocking(g_log_fd, 1);
-	log_write("\n\n\n\n", 4);
-	LOG_INFO(PACKAGE_STRING": started");
+	syslog(LOG_NOTICE, PACKAGE_STRING": started!");
 #ifdef DEBUG
-	LOG_INFO("Build: "__DATE__" "__TIME__", DEBUG");
+	syslog(LOG_INFO, "Build: "__DATE__" "__TIME__", DEBUG.");
 #else
-	LOG_INFO("Build: "__DATE__" "__TIME__", Release");
+	syslog(LOG_INFO, "Build: "__DATE__" "__TIME__", Release.");
 #endif
-	LOG_INFO_FMT("CPU count: %d", get_cpu_count());
-	LOG_INFO_FMT("descriptor table size: %d (max files)", getdtablesize());
+	syslog(LOG_INFO, "CPU count: %d.", get_cpu_count());
+	syslog(LOG_INFO, "Descriptor table size: %d (max files).", getdtablesize());
+
 
 	/* System resource limits. */
 	if (0 == MSD_CFG_GET_VAL_DATA(NULL, &data, &data_size,
@@ -358,16 +350,16 @@ main(int argc, char *argv[]) {
 	}
 	error = tp_create(&tp_s, &tp);
 	if (0 != error) {
-		LOG_ERR(error, "tp_create()");
+		SYSLOG_ERR(LOG_CRIT, error, "tp_create().");
 		goto err_out;
 	}
-	tp_threads_create(tp, 1);// XXX exit rewrite
+	tp_threads_create(tp, 1); /* XXX exit rewrite. */
 
 
 	/* HTTP server settings. */
 	/* Read from config. */
 	if (0 != MSD_CFG_GET_VAL_DATA(NULL, &data, &data_size, "HTTP", NULL)) {
-		LOG_INFO("No HTTP server settings, nothink to do...");
+		syslog(LOG_NOTICE, "No HTTP server settings, nothink to do...");
 		goto err_out;
 	}
 	http_srv_def_settings(1, PACKAGE_NAME"/"PACKAGE_VERSION, 1, &http_s);
@@ -381,7 +373,7 @@ main(int argc, char *argv[]) {
 	    NULL, &ccb, &http_s, &g_data,
 	    &g_data.http_srv);
  	if (0 != error) {
-		LOG_ERR(error, "http_srv_xml_load_start()");
+		SYSLOG_ERR(LOG_CRIT, error, "http_srv_xml_load_start().");
 		goto err_out;
 	}
 
@@ -407,9 +399,10 @@ main(int argc, char *argv[]) {
 	error = str_hubs_bckt_create(tp, PACKAGE_NAME"/"PACKAGE_VERSION, &g_data.hub_params,
 	    &g_data.src_params, &g_data.shbskt);
 	if (0 != error) {
-		LOG_ERR(error, "str_hubs_bckt_create()");
+		SYSLOG_ERR(LOG_CRIT, error, "str_hubs_bckt_create().");
 		goto err_out;
 	}
+	free(cfg_file_buf);
     } /* Done with config. */
 
 
@@ -442,9 +435,8 @@ main(int argc, char *argv[]) {
 	}
 
 	tp_destroy(tp);
-	LOG_INFO("exiting.");
-	close((int)g_data.log_fd);
-	free(cfg_file_buf);
+	syslog(LOG_NOTICE, "Exiting.");
+	closelog();
 
 err_out:
 	return (error);
@@ -465,7 +457,7 @@ msd_http_srv_hub_attach(http_srv_cli_p cli, uint8_t *hub_name, size_t hub_name_s
 	tp_task_p tptask;
 	uintptr_t skt;
 
-	LOGD_EV("...");
+	SYSLOGD_EX(LOG_DEBUG, "...");
 
 	if (NULL == cli || NULL == hub_name)
 		return (EINVAL);
@@ -487,7 +479,7 @@ msd_http_srv_hub_attach(http_srv_cli_p cli, uint8_t *hub_name, size_t hub_name_s
 	}
 	strh_cli = str_hub_cli_alloc(skt, (const char*)ptm, tm);
 	if (NULL == strh_cli) {
-		LOG_ERR(ENOMEM, "str_hub_cli_alloc()");
+		syslog(LOG_ERR, "str_hub_cli_alloc().");
 		return (ENOMEM);
 	}
 	/*
@@ -504,14 +496,14 @@ msd_http_srv_hub_attach(http_srv_cli_p cli, uint8_t *hub_name, size_t hub_name_s
 		sa_copy(&strh_cli->remonte_addr, &strh_cli->xreal_addr);
 	}
 
-	LOGD_INFO_FMT("%s - : attach...", hub_name);
+	SYSLOGD_EX(LOG_DEBUG, "%s - : attach...", hub_name);
 	error = str_hub_cli_attach(g_data.shbskt, strh_cli, hub_name, hub_name_size,
 	    src_conn_params);
 	/* Do not read/write to stream hub client, stream hub is new owner! */
 	if (0 != error) {
 		strh_cli->skt = (uintptr_t)-1;
 		str_hub_cli_destroy(NULL, strh_cli);
-		LOG_ERR(error, "str_hub_cli_attach()");
+		SYSLOG_ERR(LOG_ERR, error, "str_hub_cli_attach().");
 	} else {
 		tp_task_flags_del(tptask, TP_TASK_F_CLOSE_ON_DESTROY);
 		http_srv_cli_free(cli);
@@ -521,15 +513,15 @@ msd_http_srv_hub_attach(http_srv_cli_p cli, uint8_t *hub_name, size_t hub_name_s
 
 uint32_t
 msd_http_req_url_parse(http_srv_req_p req, struct sockaddr_storage *ssaddr,
-    uint32_t *if_index,
+    uint32_t *if_index, uint32_t *rejoin_time,
     uint8_t *hub_name, size_t hub_name_size, size_t *hub_name_size_ret) {
 	const uint8_t *ptm;
 	size_t tm;
-	uint32_t ifindex;
+	uint32_t ifindex, rejointime;
 	char straddr[STR_ADDR_LEN], ifname[(IFNAMSIZ + 1)];
 	struct sockaddr_storage ss;
 
-	LOGD_EV("...");
+	SYSLOGD_EX(LOG_DEBUG, "...");
 
 	if (NULL == req || NULL == hub_name || 0 == hub_name_size)
 		return (500);
@@ -562,6 +554,19 @@ msd_http_req_url_parse(http_srv_req_p req, struct sockaddr_storage *ssaddr,
 		if_indextoname(ifindex, ifname);
 	}
 
+	/* rejoin_time. */
+	if (0 == http_query_val_get(req->line.query, 
+	    req->line.query_size, (const uint8_t*)"rejoin_time", 11,
+	    &ptm, &tm)) {
+		rejointime = ustr2u32(ptm, tm);
+	} else { /* Default value. */
+		if (NULL != if_index) {
+			rejointime = (*rejoin_time);
+		} else {
+			rejointime = 0;
+		}
+	}
+
 	if (0 != sa_addr_port_to_str(&ss, straddr, sizeof(straddr), NULL))
 		return (400);
 	tm = (size_t)snprintf((char*)hub_name, hub_name_size,
@@ -571,6 +576,9 @@ msd_http_req_url_parse(http_srv_req_p req, struct sockaddr_storage *ssaddr,
 	}
 	if (NULL != if_index) {
 		(*if_index) = ifindex;
+	}
+	if (NULL != rejoin_time) {
+		(*rejoin_time) = rejointime;
 	}
 	if (NULL != hub_name_size_ret) {
 		(*hub_name_size_ret) = tm;
@@ -593,7 +601,7 @@ msd_http_srv_on_req_rcv_cb(http_srv_cli_p cli, void *udata __unused,
 	static const char *cttype = 	"Content-Type: text/plain\r\n"
 					"Pragma: no-cache";
 
-	LOGD_EV("...");
+	SYSLOGD_EX(LOG_DEBUG, "...");
 
 	if (HTTP_REQ_METHOD_GET != req->line.method_code &&
 	    HTTP_REQ_METHOD_HEAD != req->line.method_code) {
@@ -641,8 +649,11 @@ msd_http_srv_on_req_rcv_cb(http_srv_cli_p cli, void *udata __unused,
 		/* Default value. */
 		memcpy(&src_conn_params, &g_data.src_conn_params, sizeof(str_src_conn_mc_t));
 		/* Get multicast address, ifindex, hub name. */
-		resp->status_code = msd_http_req_url_parse(req, &src_conn_params.udp.addr,
-		    &src_conn_params.mc.if_index, buf, sizeof(buf), &buf_size);
+		resp->status_code = msd_http_req_url_parse(req,
+		    &src_conn_params.udp.addr,
+		    &src_conn_params.mc.if_index,
+		    &src_conn_params.mc.rejoin_time,
+		    buf, sizeof(buf), &buf_size);
 		if (200 != resp->status_code)
 			return (HTTP_SRV_CB_CONTINUE);
 		if (HTTP_REQ_METHOD_HEAD == req->line.method_code) {

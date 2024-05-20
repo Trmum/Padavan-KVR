@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2012 - 2021 Rozhuk Ivan <rozhuk.im@gmail.com>
+ * Copyright (c) 2012-2024 Rozhuk Ivan <rozhuk.im@gmail.com>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -57,7 +57,6 @@
 #include "proto/http_server.h"
 #include "stream_sys.h"
 #include "utils/info.h"
-#include "utils/log.h"
 #include "msd_lite_stat_text.h"
 
 
@@ -153,10 +152,11 @@ gen_hub_stat_text_entry_enum_cb(tpt_p tpt, str_hub_p str_hub, void *udata) {
 		    (char*)strh_cli->user_agent
 		);
 		/* Add soscket TCP stat. */
-		skt_tcp_stat_text(strh_cli->skt, "	    ",
+		if (0 == skt_tcp_stat_text(strh_cli->skt, "	    ",
 		    (char*)IO_BUF_FREE_GET(buf),
-		    IO_BUF_FREE_SIZE(buf), &stm);
-		IO_BUF_USED_INC(buf, stm);
+		    IO_BUF_FREE_SIZE(buf), &stm)) {
+			IO_BUF_USED_INC(buf, stm);
+		}
 	}
 }
 static void
